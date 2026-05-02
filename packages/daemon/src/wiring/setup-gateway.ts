@@ -896,6 +896,12 @@ export async function setupGateway(deps: GatewayDeps): Promise<GatewayResult> {
   // setup-gateway.ts is in wiring/ subdir, so go up 3 levels: wiring/ -> src/ -> daemon/ -> web/dist
   const __dirname = dirname(fileURLToPath(import.meta.url));
   const webDistPath = resolve(__dirname, "../../../web/dist");
+
+  // Read daemon package version for the /health fingerprint so callers
+  // (e.g. comis-update.sh) can verify which version is actually running
+  // post-restart. Same relative offset works for src/ and dist/ layouts.
+  const daemonPkgPath = resolve(__dirname, "../../package.json");
+  const daemonVersion = (JSON.parse(readFileSync(daemonPkgPath, "utf-8")) as { version: string }).version;
   const webEnabled = gwConfig.web.enabled;
 
   let webDeps: Parameters<typeof _createGatewayServer>[0]["webDeps"] | undefined;
@@ -945,6 +951,7 @@ export async function setupGateway(deps: GatewayDeps): Promise<GatewayResult> {
     fingerprint: {
       instanceId,
       startedAt: new Date(startupStartMs).toISOString(),
+      version: daemonVersion,
     },
   });
 

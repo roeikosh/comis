@@ -123,10 +123,11 @@ export interface RestApiDeps {
   /** Set of agent IDs currently suspended (optional; when absent all agents report "active"). */
   readonly suspendedAgents?: ReadonlySet<string>;
   /** Daemon fingerprint surfaced on /api/health so clients can confirm which
-   *  daemon they are actually talking to. */
+   *  daemon they are actually talking to and which version is running. */
   readonly fingerprint?: {
     instanceId: string;
     startedAt: string;
+    version: string;
   };
 }
 
@@ -182,6 +183,7 @@ export function createRestApi(deps: RestApiDeps): Hono<RestApiEnv> {
       ...(deps.fingerprint && {
         instanceId: deps.fingerprint.instanceId,
         startedAt: deps.fingerprint.startedAt,
+        version: deps.fingerprint.version,
       }),
     });
   });

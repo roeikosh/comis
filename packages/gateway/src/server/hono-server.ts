@@ -89,10 +89,12 @@ export interface GatewayServerDeps {
   };
   /** Daemon fingerprint surfaced on /health so clients can verify which
    *  daemon they are actually talking to (defeats local-port-collision
-   *  traffic misrouting). Omit for test harnesses. */
+   *  traffic misrouting) and confirm the running daemon version after an
+   *  upgrade. Omit for test harnesses. */
   readonly fingerprint?: {
     instanceId: string;
     startedAt: string;
+    version: string;
   };
 }
 
@@ -179,6 +181,7 @@ export function createGatewayServer(deps: GatewayServerDeps): GatewayServerHandl
       ...(deps.fingerprint && {
         instanceId: deps.fingerprint.instanceId,
         startedAt: deps.fingerprint.startedAt,
+        version: deps.fingerprint.version,
       }),
     });
   });
