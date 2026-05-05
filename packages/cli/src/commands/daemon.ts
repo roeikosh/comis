@@ -340,23 +340,16 @@ async function startDirectMode(): Promise<void> {
   }
 }
 
-type SystemdState =
-  | "active"
-  | "activating"
-  | "deactivating"
-  | "reloading"
-  | "inactive"
-  | "failed"
-  | "unknown";
-
-const KNOWN_SYSTEMD_STATES = new Set<SystemdState>([
+const KNOWN_SYSTEMD_STATES = [
   "active",
   "activating",
   "deactivating",
   "reloading",
   "inactive",
   "failed",
-]);
+] as const;
+
+type SystemdState = (typeof KNOWN_SYSTEMD_STATES)[number] | "unknown";
 
 /**
  * Read the unit's `is-active` state. Does not require sudo.
@@ -371,7 +364,7 @@ async function getSystemdState(
 ): Promise<SystemdState | null> {
   const parse = (raw: string): SystemdState => {
     const s = raw.trim();
-    return KNOWN_SYSTEMD_STATES.has(s as SystemdState) ? (s as SystemdState) : "unknown";
+    return (KNOWN_SYSTEMD_STATES as readonly string[]).includes(s) ? (s as SystemdState) : "unknown";
   };
   try {
     const { stdout } = await exec(
