@@ -340,17 +340,50 @@ async function startDirectMode(): Promise<void> {
   }
 }
 
-/** Check if a systemd unit is already active (does not require sudo). */
-async function isSystemdActive(manager: "systemd" | "systemd-user"): Promise<boolean> {
+type SystemdState =
+  | "active"
+  | "activating"
+  | "deactivating"
+  | "reloading"
+  | "inactive"
+  | "failed"
+  | "unknown";
+
+const KNOWN_SYSTEMD_STATES = new Set<SystemdState>([
+  "active",
+  "activating",
+  "deactivating",
+  "reloading",
+  "inactive",
+  "failed",
+]);
+
+/**
+ * Read the unit's `is-active` state. Does not require sudo.
+ *
+ * `systemctl is-active` exits 0 only for state="active"; for every other
+ * state it exits non-zero with the state name on stdout. Node's promisified
+ * execFile rejects on non-zero, so we read stdout off the rejection in the
+ * catch arm. Returns `null` only when systemctl itself is unreachable.
+ */
+async function getSystemdState(
+  manager: "systemd" | "systemd-user",
+): Promise<SystemdState | null> {
+  const parse = (raw: string): SystemdState => {
+    const s = raw.trim();
+    return KNOWN_SYSTEMD_STATES.has(s as SystemdState) ? (s as SystemdState) : "unknown";
+  };
   try {
     const { stdout } = await exec(
       "systemctl",
       systemctlArgs(manager, "is-active", "comis"),
       { timeout: 5_000 },
     );
-    return stdout.trim() === "active";
-  } catch {
-    return false;
+    return parse(stdout);
+  } catch (err) {
+    const stdout = (err as { stdout?: string } | null)?.stdout;
+    if (typeof stdout === "string" && stdout.trim().length > 0) return parse(stdout);
+    return null;
   }
 }
 
@@ -361,7 +394,8 @@ async function handleDaemonStart(): Promise<void> {
     switch (manager) {
       case "systemd":
       case "systemd-user": {
-        if (await isSystemdActive(manager)) {
+        const state = await getSystemdState(manager);
+        if (state === "active" || state === "reloading") {
           // Verify the CLI can actually talk to the daemon
           try {
             await withClient(async (client) => client.call("system.ping", {}));
@@ -376,7 +410,24 @@ async function handleDaemonStart(): Promise<void> {
           }
           return;
         }
+        if (state === "activating") {
+          info("Daemon is already starting (systemd state=activating); not issuing another start");
+          info("Check progress: systemctl status comis");
+          return;
+        }
+        if (state === "deactivating") {
+          info("Daemon is currently stopping (systemd state=deactivating); wait, then run start again");
+          return;
+        }
         const scope = manager === "systemd-user" ? "systemd (user scope)" : "systemd";
+        if (state === "failed") {
+          info("Daemon is in failed state; clearing failure counter before start");
+          try {
+            await execSystemctl(manager, "reset-failed", "comis");
+          } catch {
+            // best-effort -- if we can't reset-failed, systemd start will surface the real error
+          }
+        }
         info(`Starting daemon via ${scope}...`);
         try {
           await execSystemctl(manager, "start", "comis");
@@ -412,11 +463,24 @@ async function handleDaemonStop(): Promise<void> {
     switch (manager) {
       case "systemd":
       case "systemd-user": {
-        if (!(await isSystemdActive(manager))) {
+        const state = await getSystemdState(manager);
+        if (state === "inactive") {
           warn("Daemon is not running");
           return;
         }
+        if (state === "failed") {
+          warn("Daemon is not running (systemd unit in failed state)");
+          info("Clear with: sudo systemctl reset-failed comis");
+          return;
+        }
+        // active | activating | deactivating | reloading | unknown | null:
+        // a process may be alive (or systemd has a pending start). Issue stop --
+        // it is idempotent, and skipping it on `activating` was the bug that
+        // let `npm install -g` clobber a running daemon during update.
         const scope = manager === "systemd-user" ? "systemd (user scope)" : "systemd";
+        if (state === "activating") {
+          info("Daemon is starting up (systemd state=activating); stopping anyway");
+        }
         info(`Stopping daemon via ${scope}...`);
         try {
           await execSystemctl(manager, "stop", "comis");
