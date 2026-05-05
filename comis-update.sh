@@ -84,6 +84,8 @@ confirm() {
 }
 
 # ---------- package manager detection ----------
+# Diagnostic output goes to stderr; only the resolved manager name is printed
+# to stdout so the caller can capture it via $(detect_pkg_manager).
 detect_pkg_manager() {
   local found=()
   if command -v pnpm >/dev/null 2>&1; then
@@ -103,16 +105,16 @@ detect_pkg_manager() {
   fi
 
   if [[ ${#found[@]} -eq 0 ]]; then
-    log "no package manager reports comisai globally installed"
-    log "falling back to npm (pass --pkg-manager to override)"
-    echo "npm"
+    log "no package manager reports comisai globally installed" >&2
+    log "falling back to npm (pass --pkg-manager to override)" >&2
+    printf 'npm'
   elif [[ ${#found[@]} -gt 1 ]]; then
     warn "multiple package managers claim comisai is installed: ${found[*]}"
     warn "this is a dual-install state -- continuing risks divergence"
     die  "resolve manually (uninstall from all but one) or pass --pkg-manager"
   else
-    log "detected package manager: ${found[0]}"
-    echo "${found[0]}"
+    log "detected package manager: ${found[0]}" >&2
+    printf '%s' "${found[0]}"
   fi
 }
 
@@ -231,9 +233,92 @@ log "pre-update health command output:"
 # ---------- stop ----------
 step "stop daemon"
 if run_to 30 comis daemon stop; then
-  log "daemon stopped"
+  log "comis daemon stop returned"
 else
-  warn "comis daemon stop returned non-zero; continuing anyway"
+  warn "comis daemon stop returned non-zero; will verify directly"
+fi
+
+if [[ $DRY_RUN -eq 0 ]]; then
+  # `comis daemon stop` can return 0 while the daemon is still alive --
+  # specifically when systemd reports `activating` (sd-notify timing).
+  # Letting `npm install -g` overwrite files of a running daemon corrupts
+  # the install. Verify via /health; if still up, escalate to systemctl.
+  log "verifying daemon is stopped (polling /health)"
+  STOP_VERIFIED=0
+  for i in 1 2 3; do
+    sleep 2
+    if [[ -z "$(fetch_health)" ]]; then
+      STOP_VERIFIED=1
+      log "  /health no longer responding (attempt ${i}/3)"
+      break
+    fi
+    log "  /health still responding (attempt ${i}/3)"
+  done
+
+  # Build a systemctl prefix appropriate for the current uid. We try sudo -n
+  # only if not root; the actual auth check happens when the command runs (so
+  # we surface its error message instead of pre-rejecting).
+  sysctl_run() {
+    # $1 = "system" | "user", remaining args = systemctl subcommand+args
+    local scope="$1"; shift
+    local out rc
+    if [[ "$scope" == "user" ]]; then
+      out=$(systemctl --user "$@" 2>&1); rc=$?
+    elif [[ $EUID -eq 0 ]]; then
+      out=$(systemctl "$@" 2>&1); rc=$?
+    elif command -v sudo >/dev/null 2>&1; then
+      out=$(sudo -n systemctl "$@" 2>&1); rc=$?
+    else
+      out="(no sudo available)"; rc=127
+    fi
+    [[ -n "$out" ]] && printf '%s\n' "$out" | sed 's/^/  | /'
+    return $rc
+  }
+
+  HAS_SYSTEM_UNIT=0
+  HAS_USER_UNIT=0
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl list-unit-files comis.service 2>/dev/null | grep -qE '^comis\.service\s'; then
+      HAS_SYSTEM_UNIT=1
+    fi
+    if systemctl --user list-unit-files comis.service 2>/dev/null | grep -qE '^comis\.service\s'; then
+      HAS_USER_UNIT=1
+    fi
+  fi
+  log "systemd units: system=${HAS_SYSTEM_UNIT} user=${HAS_USER_UNIT}"
+
+  if [[ $STOP_VERIFIED -eq 0 ]]; then
+    if [[ $HAS_SYSTEM_UNIT -eq 1 ]]; then
+      warn "escalating: systemctl stop comis (system unit)"
+      sysctl_run system stop comis && log "  systemctl stop comis OK" || warn "  systemctl stop comis rc=$?"
+    fi
+    if [[ $HAS_USER_UNIT -eq 1 ]]; then
+      warn "escalating: systemctl --user stop comis"
+      sysctl_run user stop comis && log "  systemctl --user stop comis OK" || warn "  systemctl --user stop comis rc=$?"
+    fi
+    for i in 1 2 3 4 5; do
+      sleep 2
+      if [[ -z "$(fetch_health)" ]]; then
+        STOP_VERIFIED=1
+        log "  /health no longer responding after escalation (attempt ${i}/5)"
+        break
+      fi
+      log "  /health still responding after escalation (attempt ${i}/5)"
+    done
+  fi
+
+  if [[ $STOP_VERIFIED -eq 0 ]]; then
+    die "daemon still serving /health after stop attempts -- aborting before install to avoid corrupting a running daemon. Stop manually (e.g. 'sudo systemctl stop comis') and retry."
+  fi
+
+  # Reset systemd failure counter so any install-time blip doesn't burn
+  # through the restart budget mid-install.
+  if [[ $HAS_SYSTEM_UNIT -eq 1 ]]; then
+    sysctl_run system reset-failed comis >/dev/null 2>&1 && log "systemctl reset-failed comis (system unit)" || true
+  fi
+  if [[ $HAS_USER_UNIT -eq 1 ]]; then
+    sysctl_run user reset-failed comis >/dev/null 2>&1 && log "systemctl --user reset-failed comis" || true
+  fi
 fi
 
 # ---------- install ----------
