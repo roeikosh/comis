@@ -897,11 +897,21 @@ export async function setupGateway(deps: GatewayDeps): Promise<GatewayResult> {
   const __dirname = dirname(fileURLToPath(import.meta.url));
   const webDistPath = resolve(__dirname, "../../../web/dist");
 
-  // Read daemon package version for the /health fingerprint so callers
-  // (e.g. comis-update.sh) can verify which version is actually running
-  // post-restart. Same relative offset works for src/ and dist/ layouts.
-  const daemonPkgPath = resolve(__dirname, "../../package.json");
-  const daemonVersion = (JSON.parse(readFileSync(daemonPkgPath, "utf-8")) as { version: string }).version;
+  // Daemon version for /health fingerprint; lets callers (e.g. comis-update.sh)
+  // verify which version is actually running post-restart.
+  // Two levels up from wiring/ → packages/daemon/package.json (works in src/ and dist/).
+  let daemonVersion = "unknown";
+  try {
+    const daemonPkgPath = resolve(__dirname, "../../package.json");
+    const pkgJson = JSON.parse(readFileSync(daemonPkgPath, "utf-8")) as { version?: string };
+    daemonVersion = pkgJson.version ?? "unknown";
+  } catch (err) {
+    gatewayLogger.warn({
+      err: err instanceof Error ? err.message : String(err),
+      hint: "Check that packages/daemon/package.json exists and is readable",
+      errorKind: "config" as const,
+    }, "Failed to read daemon version from package.json");
+  }
   const webEnabled = gwConfig.web.enabled;
 
   let webDeps: Parameters<typeof _createGatewayServer>[0]["webDeps"] | undefined;

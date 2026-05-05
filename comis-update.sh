@@ -310,15 +310,6 @@ if [[ $DRY_RUN -eq 0 ]]; then
   if [[ $STOP_VERIFIED -eq 0 ]]; then
     die "daemon still serving /health after stop attempts -- aborting before install to avoid corrupting a running daemon. Stop manually (e.g. 'sudo systemctl stop comis') and retry."
   fi
-
-  # Reset systemd failure counter so any install-time blip doesn't burn
-  # through the restart budget mid-install.
-  if [[ $HAS_SYSTEM_UNIT -eq 1 ]]; then
-    sysctl_run system reset-failed comis >/dev/null 2>&1 && log "systemctl reset-failed comis (system unit)" || true
-  fi
-  if [[ $HAS_USER_UNIT -eq 1 ]]; then
-    sysctl_run user reset-failed comis >/dev/null 2>&1 && log "systemctl --user reset-failed comis" || true
-  fi
 fi
 
 # ---------- install ----------

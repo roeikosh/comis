@@ -467,9 +467,7 @@ async function handleDaemonStop(): Promise<void> {
           return;
         }
         // active | activating | deactivating | reloading | unknown | null:
-        // a process may be alive (or systemd has a pending start). Issue stop --
-        // it is idempotent, and skipping it on `activating` was the bug that
-        // let `npm install -g` clobber a running daemon during update.
+        // a process may be alive or pending. systemctl stop is idempotent.
         const scope = manager === "systemd-user" ? "systemd (user scope)" : "systemd";
         if (state === "activating") {
           info("Daemon is starting up (systemd state=activating); stopping anyway");
