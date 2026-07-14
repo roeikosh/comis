@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { matchExecRecoveryHint } from "./exec-diagnostics.js";
+import { matchExecRecoveryHint, selectSecretRefHintCandidates } from "./exec-diagnostics.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -410,5 +410,137 @@ describe("matchExecRecoveryHint — workspace-rooted venv missing matcher", () =
     expect(result!).toContain("Virtualenv not found");
     // Must NOT be the Python-module-not-found hint.
     expect(result!).not.toContain("pyproject.toml");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// matchSecretRefAvailable — stored-secret env-var referenced in stderr
+// ---------------------------------------------------------------------------
+
+describe("matchExecRecoveryHint — secretRefs-available matcher", () => {
+  const cwd = "/tmp/comis-diag-secret-test";
+
+  /** gh CLI's real unauthenticated-in-sandbox failure (exit code 4). */
+  const GH_AUTH_STDERR =
+    "To get started with GitHub CLI, please run:  gh auth login\n" +
+    "Alternatively, populate the GH_TOKEN environment variable with a GitHub API authentication token.\n";
+
+  it("positive — hints secretRefs when stderr names an env var that exists in the secret store", () => {
+    const result = matchExecRecoveryHint({
+      stderr: GH_AUTH_STDERR,
+      exitCode: 4,
+      cwd,
+      availableSecretNames: ["GH_TOKEN", "TAVILY_API_KEY"],
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.startsWith("RECOVERY HINT: ")).toBe(true);
+    expect(result!).toContain('secretRefs: ["GH_TOKEN"]');
+    // Only the mentioned secret is suggested — not every stored one.
+    expect(result!).not.toContain("TAVILY_API_KEY");
+    expect(result!.endsWith("\n")).toBe(false);
+  });
+
+  it("positive — suggests every mentioned available secret, deterministically sorted", () => {
+    const stderr =
+      "error: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID must be set\n";
+    const result = matchExecRecoveryHint({
+      stderr,
+      exitCode: 1,
+      cwd,
+      availableSecretNames: ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"],
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!).toContain('secretRefs: ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"]');
+  });
+
+  it("abstains on exit code 0 even when stderr names an available secret", () => {
+    const result = matchExecRecoveryHint({
+      stderr: GH_AUTH_STDERR,
+      exitCode: 0,
+      cwd,
+      availableSecretNames: ["GH_TOKEN"],
+    });
+    expect(result).toBeNull();
+  });
+
+  it("abstains when no availableSecretNames are provided (call sites without a secret store)", () => {
+    expect(
+      matchExecRecoveryHint({ stderr: GH_AUTH_STDERR, exitCode: 4, cwd }),
+    ).toBeNull();
+    expect(
+      matchExecRecoveryHint({
+        stderr: GH_AUTH_STDERR,
+        exitCode: 4,
+        cwd,
+        availableSecretNames: [],
+      }),
+    ).toBeNull();
+  });
+
+  it("abstains when stderr mentions env vars that are NOT in the available set", () => {
+    const result = matchExecRecoveryHint({
+      stderr: GH_AUTH_STDERR,
+      exitCode: 4,
+      cwd,
+      availableSecretNames: ["CLOUDFLARE_API_TOKEN"],
+    });
+    expect(result).toBeNull();
+  });
+
+  it("abstains on empty stderr regardless of available secrets", () => {
+    const result = matchExecRecoveryHint({
+      stderr: "",
+      exitCode: 4,
+      cwd,
+      availableSecretNames: ["GH_TOKEN"],
+    });
+    expect(result).toBeNull();
+  });
+
+  it("does not match a secret name that only appears as a substring of a longer token", () => {
+    // GH_TOKEN_LEGACY must not word-boundary-match GH_TOKEN.
+    const result = matchExecRecoveryHint({
+      stderr: "error: GH_TOKEN_LEGACY is not set\n",
+      exitCode: 1,
+      cwd,
+      availableSecretNames: ["GH_TOKEN"],
+    });
+    expect(result).toBeNull();
+  });
+
+  it("dedupes a secret mentioned multiple times in stderr into a single suggestion", () => {
+    const result = matchExecRecoveryHint({
+      stderr: "GH_TOKEN missing. Set GH_TOKEN and retry.\n",
+      exitCode: 1,
+      cwd,
+      availableSecretNames: ["GH_TOKEN"],
+    });
+    expect(result).not.toBeNull();
+    expect(result!.match(/secretRefs/g)).toHaveLength(1);
+    expect(result!).toContain('secretRefs: ["GH_TOKEN"]');
+  });
+});
+
+describe("selectSecretRefHintCandidates: filters store names down to hintable secretRefs", () => {
+  it("keeps only SCREAMING_SNAKE names that are neither platform-managed nor already injected", () => {
+    const names = [
+      "GH_TOKEN",                                  // hintable
+      "TAVILY_API_KEY",                            // hintable
+      "ANTHROPIC_API_KEY",                         // platform-managed → excluded
+      "CLOUDFLARE_API_TOKEN",                      // already injected → excluded
+      "activity.interactiveCallbackSigningSecret", // not a valid secretRefs name → excluded
+    ];
+    const result = selectSecretRefHintCandidates(
+      names,
+      new Set(["ANTHROPIC_API_KEY"]),
+      new Set(["CLOUDFLARE_API_TOKEN"]),
+    );
+    expect(result).toEqual(["GH_TOKEN", "TAVILY_API_KEY"]);
+  });
+
+  it("returns an empty array when the store is empty", () => {
+    expect(selectSecretRefHintCandidates([], new Set(), new Set())).toEqual([]);
   });
 });
