@@ -56,6 +56,7 @@ export function executeForeground(
   getToolResultsDir?: () => string | undefined,
   installDetourDecision?: InstallDetourDecision,
   installDetourMode?: "observe" | "advise" | "soft-stop",
+  availableSecretNames?: readonly string[],
 ): Promise<AgentToolResult<unknown>> {
   const startTime = performance.now();
   const startTimeMs = systemNowMs();
@@ -275,7 +276,7 @@ export function executeForeground(
       // failures (e.g. Python ModuleNotFoundError + missing pyproject.toml). Same
       // surfacing pattern as breakSystemWarning on stdout — gives the LLM an
       // actionable next step at the HEAD of stderr instead of buried in JSON.
-      const recoveryHint = matchExecRecoveryHint({ stderr: finalStderr, exitCode, cwd });
+      const recoveryHint = matchExecRecoveryHint({ stderr: finalStderr, exitCode, cwd, availableSecretNames });
       if (recoveryHint) {
         finalStderr = recoveryHint + (finalStderr ? "\n" + finalStderr : "");
       }

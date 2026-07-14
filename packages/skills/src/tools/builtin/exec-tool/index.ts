@@ -35,6 +35,7 @@ import {
   evaluateInstallDetourGate,
   buildExecEnv,
 } from "./exec-shared.js";
+import { selectSecretRefHintCandidates } from "../exec-diagnostics.js";
 import { executeForeground } from "./exec-foreground.js";
 import { executeBackground } from "./exec-background.js";
 
@@ -181,7 +182,11 @@ export function createExecTool(deps: ExecToolDeps): AgentTool<typeof ExecParams>
         if (background) {
           return executeBackground(command, cwd, finalEnv as NodeJS.ProcessEnv, input, registry, logger, sandboxConfig, workspacePath, tempDir, description, pty, gate.decision ?? undefined, gate.mode);
         }
-        const result = await executeForeground(command, cwd, finalEnv as NodeJS.ProcessEnv, timeoutMs, input, signal, onUpdate, logger, sandboxConfig, workspacePath, tempDir, registry, autoBackgroundMs, pty, description, toolCallId, getToolResultsDir, gate.decision ?? undefined, gate.mode);
+        // Names the recovery-hint diagnostics may suggest as secretRefs on failure.
+        const availableSecretNames = selectSecretRefHintCandidates(
+          secretManager.keys(), platformSecretNames, new Set(Object.keys(resolvedSecretEnv ?? {})),
+        );
+        const result = await executeForeground(command, cwd, finalEnv as NodeJS.ProcessEnv, timeoutMs, input, signal, onUpdate, logger, sandboxConfig, workspacePath, tempDir, registry, autoBackgroundMs, pty, description, toolCallId, getToolResultsDir, gate.decision ?? undefined, gate.mode, availableSecretNames);
         if (breakSystemWarning && result.details) {
           const details = result.details as Record<string, unknown>;
           if (typeof details.stdout === "string") details.stdout = breakSystemWarning + details.stdout;

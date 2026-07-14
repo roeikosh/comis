@@ -19,6 +19,7 @@
 
 import { existsSync, statSync } from "node:fs";
 import { safePath } from "@comis/core";
+import { SECRET_REF_NAME_PATTERN } from "./exec-tool/exec-types.js";
 
 export interface ExecRecoveryInput {
   /** Final stderr text (post-truncation, post-timeout/abort suffix). */
@@ -27,6 +28,13 @@ export interface ExecRecoveryInput {
   exitCode: number;
   /** Absolute working directory the command ran in. Already workspace-bounded by exec-tool's resolveCwd. */
   cwd: string;
+  /**
+   * Secret-store names the failed command could have requested via `secretRefs`
+   * but did not: valid secretRefs names only, minus platform-managed secrets and
+   * minus any refs already injected into this command. Callers without a secret
+   * store omit it; the secretRefs matcher then abstains.
+   */
+  availableSecretNames?: readonly string[];
 }
 
 type Matcher = (input: ExecRecoveryInput) => string | null;
@@ -190,13 +198,73 @@ const matchVenvMissing: Matcher = ({ stderr, exitCode, cwd }) => {
 };
 
 // ---------------------------------------------------------------------------
+// Matcher: stderr references an env var that is available as a secretRef
+// ---------------------------------------------------------------------------
+
+/**
+ * Match failures where stderr names an environment variable that exists in the
+ * encrypted secret store but was not injected into the command. The sandboxed
+ * exec environment deliberately excludes host credentials (e.g. `~/.config/gh`
+ * is never bind-mounted), so CLIs that are authenticated for the daemon user
+ * fail with "set the FOO_TOKEN environment variable"-style errors — and the
+ * agent's observed recovery is to retry the identical command instead of
+ * reaching for `secretRefs`. Canonical trigger: `gh` exiting 4 with
+ * "populate the GH_TOKEN environment variable".
+ *
+ * Tight by construction: only exact word-boundary matches against the
+ * pre-filtered `availableSecretNames` fire (names the caller verified are
+ * present, valid as secretRefs, non-platform-managed, and not already
+ * injected). A name in stderr that the store cannot satisfy stays silent so
+ * the LLM sees the real error.
+ */
+const ENV_VAR_TOKEN_RE = /\b[A-Z][A-Z0-9_]{2,}\b/g;
+
+/**
+ * Select the secret-store names the recovery-hint diagnostics may suggest as
+ * `secretRefs` after a failed command: syntactically valid secretRefs names
+ * only, minus platform-managed secrets (resolveSecretRefs refuses those) and
+ * minus refs already injected into the failing command (suggesting a secret
+ * that was present and still failed would point the wrong way).
+ */
+export function selectSecretRefHintCandidates(
+  secretNames: readonly string[],
+  platformSecretNames: ReadonlySet<string>,
+  injectedNames: ReadonlySet<string>,
+): string[] {
+  return secretNames.filter(
+    (n) => SECRET_REF_NAME_PATTERN.test(n) && !platformSecretNames.has(n) && !injectedNames.has(n),
+  );
+}
+
+const matchSecretRefAvailable: Matcher = ({ stderr, exitCode, availableSecretNames }) => {
+  if (exitCode === 0) return null;
+  if (!stderr || !availableSecretNames || availableSecretNames.length === 0) return null;
+
+  const available = new Set(availableSecretNames);
+  const mentioned = new Set<string>();
+  for (const m of stderr.matchAll(ENV_VAR_TOKEN_RE)) {
+    if (available.has(m[0])) mentioned.add(m[0]);
+  }
+  if (mentioned.size === 0) return null;
+
+  const names = [...mentioned].sort();
+  const refs = names.map((n) => `"${n}"`).join(", ");
+  return (
+    `RECOVERY HINT: The error references ${names.join(", ")} — stored in the encrypted secret store ` +
+    `but not injected into this command's environment. The sandbox does not inherit host credentials; ` +
+    `retry the same command with secretRefs: [${refs}] to inject ${names.length === 1 ? "it" : "them"} as env var${names.length === 1 ? "" : "s"}.`
+  );
+};
+
+// ---------------------------------------------------------------------------
 // Registry + entry point
 // ---------------------------------------------------------------------------
 
 const matchers: ReadonlyArray<Matcher> = [
   matchPythonModuleNotFound,
   matchVenvMissing,
-  // Future: matchNodeModuleNotFound, matchCommandNotFound, matchEnvVarMissing, ...
+  matchSecretRefAvailable,
+  // Future: matchNodeModuleNotFound, matchCommandNotFound, ...
 ];
 
 /**
